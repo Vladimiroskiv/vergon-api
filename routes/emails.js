@@ -11,6 +11,24 @@ const auth = require('../middleware/auth');
 const SMTP_HOST = 'mail.vergon.art';
 const SMTP_PORT = 465;
 
+const transporterCache = {};
+function getTransporter(email, password) {
+  if (!transporterCache[email]) {
+    transporterCache[email] = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: true,
+      pool: true,
+      maxConnections: 3,
+      auth: { user: email, pass: password },
+      tls: { rejectUnauthorized: false },
+      connectionTimeout: 8000,
+      greetingTimeout: 5000,
+    });
+  }
+  return transporterCache[email];
+}
+
 const PROXY_URL = process.env.CPANEL_PROXY_URL || 'https://vergon.art/cpanel-proxy.php';
 const PROXY_SECRET = process.env.CPANEL_PROXY_SECRET || 'vrgn_proxy_2026_xK9mP';
 const IMAP_HOST = 'mail.vergon.art';
@@ -240,13 +258,7 @@ router.post('/accounts/:email/send', auth, async (req, res) => {
     }
     const password = decrypt(result.rows[0].password_enc);
 
-    const transporter = nodemailer.createTransport({
-      host: SMTP_HOST,
-      port: SMTP_PORT,
-      secure: true,
-      auth: { user: email, pass: password },
-      tls: { rejectUnauthorized: false },
-    });
+    const transporter = getTransporter(email, password);
 
     const mailOptions = {
       from: email,
