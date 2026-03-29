@@ -1,30 +1,21 @@
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
-const https = require('https');
 const auth = require('../middleware/auth');
 
-const CPANEL_URL = process.env.CPANEL_URL || 'https://vergon.art:2083';
-const CPANEL_USER = process.env.CPANEL_USER;
-const CPANEL_PASS = process.env.CPANEL_PASS;
-const DOMAIN = 'vergon.art';
+const PROXY_URL = process.env.CPANEL_PROXY_URL || 'https://vergon.art/cpanel-proxy.php';
+const PROXY_SECRET = process.env.CPANEL_PROXY_SECRET || 'vrgn_proxy_2026_xK9mP';
 
-const cpanel = axios.create({
-  baseURL: CPANEL_URL,
-  auth: { username: CPANEL_USER, password: CPANEL_PASS },
-  httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-});
+const proxyHeaders = { 'X-Proxy-Secret': PROXY_SECRET };
 
 // List email accounts
 router.get('/accounts', auth, async (req, res) => {
   try {
-    const response = await cpanel.get('/execute/Email/list_pops_with_disk', {
-      params: { domain: DOMAIN, no_system_accts: 1 },
-    });
+    const response = await axios.get(`${PROXY_URL}?action=list`, { headers: proxyHeaders });
     const accounts = response.data.data || [];
     res.json({ accounts });
   } catch (err) {
-    console.error('cPanel list error:', err.message);
+    console.error('Proxy list error:', err.message);
     res.status(500).json({ error: 'Eroare la listare emailuri' });
   }
 });
@@ -36,17 +27,15 @@ router.post('/accounts', auth, async (req, res) => {
     return res.status(400).json({ error: 'Username si parola sunt obligatorii' });
   }
   try {
-    const response = await cpanel.post('/execute/Email/add_pop', null, {
-      params: { email: username, domain: DOMAIN, password, quota },
-    });
+    const response = await axios.post(`${PROXY_URL}?action=create`, { username, password, quota }, { headers: proxyHeaders });
     if (response.data.status === 1) {
-      res.json({ success: true, email: `${username}@${DOMAIN}` });
+      res.json({ success: true, email: `${username}@vergon.art` });
     } else {
       const errMsg = response.data.errors?.[0] || 'Eroare la creare';
       res.status(400).json({ error: errMsg });
     }
   } catch (err) {
-    console.error('cPanel create error:', err.message);
+    console.error('Proxy create error:', err.message);
     res.status(500).json({ error: 'Eroare la creare email' });
   }
 });
@@ -55,9 +44,7 @@ router.post('/accounts', auth, async (req, res) => {
 router.delete('/accounts/:username', auth, async (req, res) => {
   const { username } = req.params;
   try {
-    const response = await cpanel.post('/execute/Email/delete_pop', null, {
-      params: { email: username, domain: DOMAIN },
-    });
+    const response = await axios.post(`${PROXY_URL}?action=delete`, { username }, { headers: proxyHeaders });
     if (response.data.status === 1) {
       res.json({ success: true });
     } else {
@@ -65,7 +52,7 @@ router.delete('/accounts/:username', auth, async (req, res) => {
       res.status(400).json({ error: errMsg });
     }
   } catch (err) {
-    console.error('cPanel delete error:', err.message);
+    console.error('Proxy delete error:', err.message);
     res.status(500).json({ error: 'Eroare la stergere email' });
   }
 });
