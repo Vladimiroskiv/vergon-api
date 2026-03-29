@@ -242,6 +242,45 @@ router.get('/accounts/:email/message/:seqno', auth, async (req, res) => {
   }
 });
 
+// Delete email from inbox
+router.delete('/accounts/:email/message/:seqno', auth, async (req, res) => {
+  const { email, seqno } = req.params;
+  try {
+    const result = await db.query('SELECT password_enc FROM email_accounts WHERE email = $1', [email]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Email negasit' });
+    const password = decrypt(result.rows[0].password_enc);
+
+    await new Promise((resolve, reject) => {
+      const imap = new Imap({
+        user: email, password,
+        host: IMAP_HOST, port: IMAP_PORT,
+        tls: true, tlsOptions: { rejectUnauthorized: false },
+        connTimeout: 10000, authTimeout: 10000,
+      });
+      imap.once('ready', () => {
+        imap.openBox('INBOX', false, (err) => {
+          if (err) { imap.end(); return reject(err); }
+          imap.seq.addFlags(parseInt(seqno), '\\Deleted', (err) => {
+            if (err) { imap.end(); return reject(err); }
+            imap.expunge((err) => {
+              imap.end();
+              if (err) return reject(err);
+              resolve();
+            });
+          });
+        });
+      });
+      imap.once('error', reject);
+      imap.connect();
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('IMAP delete error:', err.message);
+    res.status(500).json({ error: 'Eroare la stergere mesaj' });
+  }
+});
+
 // Send email
 router.post('/accounts/:email/send', auth, async (req, res) => {
   const { email } = req.params;
