@@ -3,9 +3,13 @@ const router = express.Router();
 const axios = require('axios');
 const Imap = require('imap');
 const { simpleParser } = require('mailparser');
+const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 const db = require('../config/db');
 const auth = require('../middleware/auth');
+
+const SMTP_HOST = 'mail.vergon.art';
+const SMTP_PORT = 465;
 
 const PROXY_URL = process.env.CPANEL_PROXY_URL || 'https://vergon.art/cpanel-proxy.php';
 const PROXY_SECRET = process.env.CPANEL_PROXY_SECRET || 'vrgn_proxy_2026_xK9mP';
@@ -217,6 +221,50 @@ router.get('/accounts/:email/message/:seqno', auth, async (req, res) => {
   } catch (err) {
     console.error('IMAP message error:', err.message);
     res.status(500).json({ error: 'Eroare la citire mesaj' });
+  }
+});
+
+// Send email
+router.post('/accounts/:email/send', auth, async (req, res) => {
+  const { email } = req.params;
+  const { to, subject, body, replyTo } = req.body;
+
+  if (!to || !subject || !body) {
+    return res.status(400).json({ error: 'Destinatar, subiect si mesaj sunt obligatorii' });
+  }
+
+  try {
+    const result = await db.query('SELECT password_enc FROM email_accounts WHERE email = $1', [email]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Email negasit in baza de date' });
+    }
+    const password = decrypt(result.rows[0].password_enc);
+
+    const transporter = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: true,
+      auth: { user: email, pass: password },
+      tls: { rejectUnauthorized: false },
+    });
+
+    const mailOptions = {
+      from: email,
+      to,
+      subject,
+      text: body,
+    };
+
+    if (replyTo) {
+      mailOptions.inReplyTo = replyTo;
+      mailOptions.references = replyTo;
+    }
+
+    await transporter.sendMail(mailOptions);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('SMTP send error:', err.message);
+    res.status(500).json({ error: 'Eroare la trimitere email: ' + err.message });
   }
 });
 
