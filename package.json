@@ -17,6 +17,7 @@
     "express": "^5.2.1",
     "imap": "^0.8.19",
     "jsonwebtoken": "^9.0.3",
+    "mailparser": "^3.9.6",
     "nodemailer": "^8.0.4",
     "pg": "^8.20.0"
   }
