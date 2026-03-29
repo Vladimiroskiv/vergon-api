@@ -53,54 +53,51 @@ function decrypt(text) {
   return Buffer.concat([decipher.update(enc), decipher.final()]).toString();
 }
 
-function fetchEmails(user, password, limit = 20) {
+function fetchEmails(user, password, limit = 20, folder = 'INBOX') {
   return new Promise((resolve, reject) => {
     const imap = new Imap({
-      user,
-      password,
-      host: IMAP_HOST,
-      port: IMAP_PORT,
-      tls: true,
-      tlsOptions: { rejectUnauthorized: false },
-      connTimeout: 10000,
-      authTimeout: 10000,
+      user, password,
+      host: IMAP_HOST, port: IMAP_PORT,
+      tls: true, tlsOptions: { rejectUnauthorized: false },
+      connTimeout: 10000, authTimeout: 10000,
     });
 
+    const mailbox = (folder === 'UNSEEN' || folder === 'SEEN') ? 'INBOX' : folder;
+    const searchCriteria = folder === 'UNSEEN' ? ['UNSEEN'] : folder === 'SEEN' ? ['SEEN'] : ['ALL'];
+
     imap.once('ready', () => {
-      imap.openBox('INBOX', true, (err, box) => {
+      imap.openBox(mailbox, true, (err, box) => {
         if (err) { imap.end(); return reject(err); }
 
-        const total = box.messages.total;
-        if (total === 0) { imap.end(); return resolve([]); }
+        imap.search(searchCriteria, (err, uids) => {
+          if (err) { imap.end(); return reject(err); }
+          if (!uids || uids.length === 0) { imap.end(); return resolve([]); }
 
-        const start = Math.max(1, total - limit + 1);
-        const fetch = imap.seq.fetch(`${start}:${total}`, {
-          bodies: 'HEADER.FIELDS (FROM TO SUBJECT DATE)',
-          struct: true,
-        });
-
-        const messages = [];
-        fetch.on('message', (msg, seqno) => {
-          const message = { seqno };
-          msg.on('body', (stream) => {
-            let buffer = '';
-            stream.on('data', (chunk) => buffer += chunk.toString());
-            stream.once('end', () => {
-              const parsed = Imap.parseHeader(buffer);
-              message.from = parsed.from?.[0] || '';
-              message.subject = parsed.subject?.[0] || '(fara subiect)';
-              message.date = parsed.date?.[0] || '';
-            });
+          const slice = uids.slice(-limit);
+          const fetch = imap.fetch(slice, {
+            bodies: 'HEADER.FIELDS (FROM TO SUBJECT DATE)',
+            struct: true,
           });
-          msg.once('end', () => messages.push(message));
-        });
 
-        fetch.once('end', () => {
-          imap.end();
-          resolve(messages.reverse());
-        });
+          const messages = [];
+          fetch.on('message', (msg, seqno) => {
+            const message = { seqno };
+            msg.on('body', (stream) => {
+              let buffer = '';
+              stream.on('data', (chunk) => buffer += chunk.toString());
+              stream.once('end', () => {
+                const parsed = Imap.parseHeader(buffer);
+                message.from = parsed.from?.[0] || '';
+                message.subject = parsed.subject?.[0] || '(fara subiect)';
+                message.date = parsed.date?.[0] || '';
+              });
+            });
+            msg.once('end', () => messages.push(message));
+          });
 
-        fetch.once('error', (e) => { imap.end(); reject(e); });
+          fetch.once('end', () => { imap.end(); resolve(messages.reverse()); });
+          fetch.once('error', (e) => { imap.end(); reject(e); });
+        });
       });
     });
 
@@ -211,13 +208,14 @@ router.delete('/accounts/:username', auth, async (req, res) => {
 // Get inbox for an email account
 router.get('/accounts/:email/inbox', auth, async (req, res) => {
   const { email } = req.params;
+  const { folder = 'INBOX' } = req.query;
   try {
     const result = await db.query('SELECT password_enc FROM email_accounts WHERE email = $1', [email]);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Email negasit in baza de date' });
     }
     const password = decrypt(result.rows[0].password_enc);
-    const messages = await fetchEmails(email, password);
+    const messages = await fetchEmails(email, password, 20, folder);
     res.json({ messages });
   } catch (err) {
     console.error('IMAP inbox error:', err.message);
