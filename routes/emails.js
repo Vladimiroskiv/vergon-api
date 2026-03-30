@@ -106,7 +106,7 @@ function fetchEmails(user, password, limit = 20, folder = 'INBOX') {
   });
 }
 
-function fetchEmailBody(user, password, seqno) {
+function fetchEmailBody(user, password, seqno, folder = 'INBOX') {
   return new Promise((resolve, reject) => {
     const imap = new Imap({
       user,
@@ -119,11 +119,12 @@ function fetchEmailBody(user, password, seqno) {
       authTimeout: 10000,
     });
 
+    const mailbox = (folder === 'UNSEEN' || folder === 'SEEN') ? 'INBOX' : folder;
     imap.once('ready', () => {
-      imap.openBox('INBOX', true, (err) => {
+      imap.openBox(mailbox, false, (err) => {
         if (err) { imap.end(); return reject(err); }
 
-        const fetch = imap.seq.fetch(seqno, { bodies: '' });
+        const fetch = imap.seq.fetch(seqno, { bodies: '', markSeen: true });
         fetch.on('message', (msg) => {
           msg.on('body', (stream) => {
             simpleParser(stream, (err, parsed) => {
@@ -226,13 +227,14 @@ router.get('/accounts/:email/inbox', auth, async (req, res) => {
 // Get full email message
 router.get('/accounts/:email/message/:seqno', auth, async (req, res) => {
   const { email, seqno } = req.params;
+  const { folder = 'INBOX' } = req.query;
   try {
     const result = await db.query('SELECT password_enc FROM email_accounts WHERE email = $1', [email]);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Email negasit in baza de date' });
     }
     const password = decrypt(result.rows[0].password_enc);
-    const message = await fetchEmailBody(email, password, parseInt(seqno));
+    const message = await fetchEmailBody(email, password, parseInt(seqno), folder);
     res.json(message);
   } catch (err) {
     console.error('IMAP message error:', err.message);
@@ -240,9 +242,10 @@ router.get('/accounts/:email/message/:seqno', auth, async (req, res) => {
   }
 });
 
-// Delete email from inbox
-router.delete('/accounts/:email/message/:seqno', auth, async (req, res) => {
+// Move email to Trash
+router.post('/accounts/:email/message/:seqno/trash', auth, async (req, res) => {
   const { email, seqno } = req.params;
+  const { folder = 'INBOX' } = req.body;
   try {
     const result = await db.query('SELECT password_enc FROM email_accounts WHERE email = $1', [email]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Email negasit' });
@@ -256,7 +259,45 @@ router.delete('/accounts/:email/message/:seqno', auth, async (req, res) => {
         connTimeout: 10000, authTimeout: 10000,
       });
       imap.once('ready', () => {
-        imap.openBox('INBOX', false, (err) => {
+        imap.openBox(folder, false, (err) => {
+          if (err) { imap.end(); return reject(err); }
+          imap.seq.move(parseInt(seqno), 'INBOX.Trash', (err) => {
+            imap.end();
+            if (err) return reject(err);
+            resolve();
+          });
+        });
+      });
+      imap.once('error', reject);
+      imap.connect();
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('IMAP move to trash error:', err.message);
+    res.status(500).json({ error: 'Eroare la mutare in gunoi' });
+  }
+});
+
+// Delete email from inbox
+router.delete('/accounts/:email/message/:seqno', auth, async (req, res) => {
+  const { email, seqno } = req.params;
+  const { folder = 'INBOX' } = req.query;
+  try {
+    const result = await db.query('SELECT password_enc FROM email_accounts WHERE email = $1', [email]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Email negasit' });
+    const password = decrypt(result.rows[0].password_enc);
+
+    await new Promise((resolve, reject) => {
+      const imap = new Imap({
+        user: email, password,
+        host: IMAP_HOST, port: IMAP_PORT,
+        tls: true, tlsOptions: { rejectUnauthorized: false },
+        connTimeout: 10000, authTimeout: 10000,
+      });
+      const mailbox = (folder === 'UNSEEN' || folder === 'SEEN') ? 'INBOX' : folder;
+      imap.once('ready', () => {
+        imap.openBox(mailbox, false, (err) => {
           if (err) { imap.end(); return reject(err); }
           imap.seq.addFlags(parseInt(seqno), '\\Deleted', (err) => {
             if (err) { imap.end(); return reject(err); }
