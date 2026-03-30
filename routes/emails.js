@@ -206,17 +206,52 @@ router.delete('/accounts/:username', auth, async (req, res) => {
   }
 });
 
-// Get inbox for an email account
+// Get inbox for an email account (with cache)
 router.get('/accounts/:email/inbox', auth, async (req, res) => {
   const { email } = req.params;
-  const { folder = 'INBOX' } = req.query;
+  const { folder = 'INBOX', refresh = 'false' } = req.query;
   try {
     const result = await db.query('SELECT password_enc FROM email_accounts WHERE email = $1', [email]);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Email negasit in baza de date' });
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Email negasit in baza de date' });
+
+    // Serve from cache if fresh (< 5 min) and no force refresh
+    if (refresh !== 'true') {
+      const cached = await db.query(
+        `SELECT seqno, from_addr, subject, date_received, is_seen
+         FROM email_cache
+         WHERE account_email = $1 AND folder = $2
+         AND cached_at > NOW() - INTERVAL '5 minutes'
+         ORDER BY date_received DESC NULLS LAST LIMIT 50`,
+        [email, folder]
+      );
+      if (cached.rows.length > 0) {
+        const messages = cached.rows.map(r => ({
+          seqno: r.seqno,
+          from: r.from_addr,
+          subject: r.subject,
+          date: r.date_received,
+          seen: r.is_seen,
+        }));
+        return res.json({ messages, fromCache: true });
+      }
     }
+
+    // Fetch fresh from IMAP
     const password = decrypt(result.rows[0].password_enc);
-    const messages = await fetchEmails(email, password, 20, folder);
+    const messages = await fetchEmails(email, password, 50, folder);
+
+    // Save to cache
+    for (const msg of messages) {
+      await db.query(
+        `INSERT INTO email_cache (account_email, folder, seqno, from_addr, subject, date_received, cached_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW())
+         ON CONFLICT (account_email, folder, seqno) DO UPDATE SET
+         from_addr = EXCLUDED.from_addr, subject = EXCLUDED.subject,
+         date_received = EXCLUDED.date_received, cached_at = NOW()`,
+        [email, folder, msg.seqno, msg.from, msg.subject, msg.date ? new Date(msg.date) : null]
+      );
+    }
+
     res.json({ messages });
   } catch (err) {
     console.error('IMAP inbox error:', err.message);
@@ -224,17 +259,35 @@ router.get('/accounts/:email/inbox', auth, async (req, res) => {
   }
 });
 
-// Get full email message
+// Get full email message (with body cache)
 router.get('/accounts/:email/message/:seqno', auth, async (req, res) => {
   const { email, seqno } = req.params;
   const { folder = 'INBOX' } = req.query;
   try {
-    const result = await db.query('SELECT password_enc FROM email_accounts WHERE email = $1', [email]);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Email negasit in baza de date' });
+    // Check body cache first
+    const cached = await db.query(
+      'SELECT body_text, body_html, from_addr, subject, date_received FROM email_cache WHERE account_email = $1 AND folder = $2 AND seqno = $3 AND body_html IS NOT NULL',
+      [email, folder, parseInt(seqno)]
+    );
+    if (cached.rows.length > 0) {
+      const r = cached.rows[0];
+      return res.json({ from: r.from_addr, subject: r.subject, date: r.date_received, text: r.body_text, html: r.body_html });
     }
+
+    const result = await db.query('SELECT password_enc FROM email_accounts WHERE email = $1', [email]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Email negasit in baza de date' });
     const password = decrypt(result.rows[0].password_enc);
     const message = await fetchEmailBody(email, password, parseInt(seqno), folder);
+
+    // Save body to cache
+    await db.query(
+      `INSERT INTO email_cache (account_email, folder, seqno, from_addr, subject, date_received, body_text, body_html, is_seen, cached_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, NOW())
+       ON CONFLICT (account_email, folder, seqno) DO UPDATE SET
+       body_text = EXCLUDED.body_text, body_html = EXCLUDED.body_html, is_seen = true, cached_at = NOW()`,
+      [email, folder, parseInt(seqno), message.from, message.subject, message.date ? new Date(message.date) : null, message.text, message.html]
+    );
+
     res.json(message);
   } catch (err) {
     console.error('IMAP message error:', err.message);
@@ -272,6 +325,8 @@ router.post('/accounts/:email/message/:seqno/trash', auth, async (req, res) => {
       imap.connect();
     });
 
+    // Remove from cache
+    await db.query('DELETE FROM email_cache WHERE account_email = $1 AND folder = $2 AND seqno = $3', [email, folder, parseInt(seqno)]);
     res.json({ success: true });
   } catch (err) {
     console.error('IMAP move to trash error:', err.message);
@@ -313,6 +368,8 @@ router.delete('/accounts/:email/message/:seqno', auth, async (req, res) => {
       imap.connect();
     });
 
+    // Remove from cache
+    await db.query('DELETE FROM email_cache WHERE account_email = $1 AND folder = $2 AND seqno = $3', [email, folder, parseInt(seqno)]);
     res.json({ success: true });
   } catch (err) {
     console.error('IMAP delete error:', err.message);
